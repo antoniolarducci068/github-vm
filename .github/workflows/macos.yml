@@ -30,20 +30,13 @@ jobs:
           sudo dscl . -append /Groups/admin GroupMembership $USERNAME
           sudo createhomedir -c -u $USERNAME 2>/dev/null || true
           
-          echo "🖥️ Creating GUI session (CRITICAL STEP)..."
-          # Enable auto-login to create active GUI session
+          echo "🖥️ Creating GUI session..."
           sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$USERNAME"
-          
-          # Start LoginWindow session - questo è il trucco!
           sudo launchctl bootstrap gui/502 /System/Library/LaunchAgents/com.apple.loginwindow.plist 2>/dev/null || true
-          
-          # Trigger GUI session creation
           sudo /System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession -switchToUserID 502 2>/dev/null || true
-          
           sleep 5
           
           echo "🔓 Configuring TCC permissions..."
-          # Add permissions to BOTH system and user TCC databases
           for DB in "/Library/Application Support/com.apple.TCC/TCC.db" "/Users/$USERNAME/Library/Application Support/com.apple.TCC/TCC.db"; do
             if [ -f "$DB" ]; then
               sudo sqlite3 "$DB" "INSERT OR REPLACE INTO access VALUES('kTCCServiceScreenCapture','com.apple.screensharing',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));" 2>/dev/null || true
@@ -56,8 +49,7 @@ jobs:
           sudo killall -9 tccd 2>/dev/null || true
           sleep 3
           
-          echo "🖥️ Enabling built-in Screen Sharing..."
-          # Method from vnc-tools/debug-on-mac
+          echo "🖥️ Enabling Screen Sharing..."
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure \
@@ -66,30 +58,28 @@ jobs:
             -privs -all \
             -restart
           
-          # Set VNC password using the perl method (funziona per il built-in VNC)
-          echo "$PASSWORD" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "
+          # Set VNC password - FIX: uso heredoc per evitare problemi con le virgolette
+          cat <<'EOF' | bash
+          echo "P@ssw0rd!" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "
 "' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt > /dev/null
+EOF
           
-          # Enable legacy VNC
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -configure \
             -clientopts -setvnclegacy -vnclegacy yes
           
-          # Final restart with console
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -restart -agent -console
           
           echo "⏳ Waiting for services..."
           sleep 10
           
-          # Check VNC port
           if lsof -iTCP:5900 -sTCP:LISTEN > /dev/null 2>&1; then
             echo "✅ VNC server is running"
           else
             echo "⚠️ VNC may not be ready yet"
           fi
           
-          # Check if GUI session exists
           if ps aux | grep -v grep | grep loginwindow > /dev/null; then
             echo "✅ GUI session is active"
           else
@@ -118,13 +108,7 @@ jobs:
           echo "Password: $PASSWORD"
           echo "================================================"
           echo ""
-          echo "Clients to use:"
-          echo "  • Apple Screen Sharing (best)"
-          echo "  • RealVNC Viewer"
-          echo "  • TigerVNC"
-          echo ""
           echo "🔄 Keeping session alive for 6 hours..."
           echo ""
           
-          # Keep the session alive
           sleep 21600
