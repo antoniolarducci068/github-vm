@@ -1,24 +1,106 @@
-name: MacRDP
-on: 
-  workflow_dispatch:
+name: macOS VNC with TCC Fix
+
+on: workflow_dispatch
+
 jobs:
-  build:
-    name: MacRDP
+  vnc-setup:
     runs-on: macos-latest
     
-    steps:                 
-    - name: Enabling RDP Access
-      env:
-        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-      run: |
-          curl -s -o start.sh -L "https://raw.githubusercontent.com/JohnnyNetsec/github-vm/main/mac/start.sh"
-          chmod +x start.sh
-          bash start.sh "$NGROK_AUTH_TOKEN"
+    steps:
+      - name: Setup VNC with TCC Permissions
+        env:
+          NGROK_TOKEN: ${{ secrets.NGROK_TOKEN }}
+        run: |
+          set -e
           
-    - name: Log In Details To VNC Server
-      run: |
-         chmod +x login.sh
-         bash login.sh
-         
-    - name: MacOS System running...
-      uses: mxschmitt/action-tmate@v2
+          echo "🔧 Disabling Spotlight..."
+          sudo mdutil -i off -a
+          
+          echo "👤 Creating admin user..."
+          sudo dscl . -create /Users/vncadmin
+          sudo dscl . -create /Users/vncadmin UserShell /bin/bash
+          sudo dscl . -create /Users/vncadmin RealName "VNC Admin"
+          sudo dscl . -create /Users/vncadmin UniqueID 1001
+          sudo dscl . -create /Users/vncadmin PrimaryGroupID 80
+          sudo dscl . -create /Users/vncadmin NFSHomeDirectory /Users/vncadmin
+          sudo dscl . -passwd /Users/vncadmin "P@ssw0rd!"
+          sudo createhomedir -c -u vncadmin > /dev/null 2>&1 || true
+          sudo dscl . -append /Groups/admin GroupMembership vncadmin
+          
+          echo "🔓 Configuring TCC permissions for Screen Recording..."
+          # Grant Screen Recording permission to screensharing agent
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "INSERT OR REPLACE INTO access VALUES('kTCCServiceScreenCapture','com.apple.screensharing.agent',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));" 2>/dev/null || true
+          
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "INSERT OR REPLACE INTO access VALUES('kTCCServicePostEvent','com.apple.screensharing.agent',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));" 2>/dev/null || true
+          
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "INSERT OR REPLACE INTO access VALUES('kTCCServiceListenEvent','com.apple.screensharing.agent',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));" 2>/dev/null || true
+          
+          # Also grant to ARDAgent
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "INSERT OR REPLACE INTO access VALUES('kTCCServiceScreenCapture','com.apple.RemoteDesktop.agent',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));" 2>/dev/null || true
+          
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "INSERT OR REPLACE INTO access VALUES('kTCCServicePostEvent','com.apple.RemoteDesktop.agent',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));" 2>/dev/null || true
+          
+          echo "🔄 Restarting TCC daemon..."
+          sudo killall -9 tccd 2>/dev/null || true
+          sleep 2
+          
+          echo "🖥️ Configuring VNC Server..."
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure \
+            -access -on \
+            -privs -all \
+            -allowAccessFor -allUsers \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw "P@ssw0rd!"
+          
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -restart -agent -console
+          
+          echo "⏳ Waiting for VNC..."
+          sleep 8
+          
+          # Verify VNC is running
+          if lsof -iTCP:5900 -sTCP:LISTEN > /dev/null 2>&1; then
+            echo "✅ VNC running on port 5900"
+          else
+            echo "⚠️ VNC might not be fully ready, but attempting connection anyway..."
+          fi
+          
+          echo "📦 Installing ngrok..."
+          brew install --cask ngrok
+          
+          echo "🔗 Starting ngrok..."
+          ngrok config add-authtoken "$NGROK_TOKEN"
+          ngrok tcp 5900 --region=us > /tmp/ngrok.log 2>&1 &
+          
+          sleep 6
+          
+          echo "🌐 Getting ngrok URL..."
+          NGROK_URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -o 'tcp://[^"]*' | head -1 || echo "")
+          
+          if [ -z "$NGROK_URL" ]; then
+            echo "⚠️ Trying alternative method..."
+            NGROK_URL=$(curl -s http://127.0.0.1:4040/api/tunnels 2>/dev/null | python3 -c "import sys, json; data=json.load(sys.stdin); print(data['tunnels'][0]['public_url'] if data.get('tunnels') else '')" 2>/dev/null || echo "Check http://localhost:4040")
+          fi
+          
+          echo ""
+          echo "=========================================="
+          echo "✅ VNC Server Ready!"
+          echo "=========================================="
+          echo "URL: ${NGROK_URL}"
+          echo "Username: vncadmin"
+          echo "Password: P@ssw0rd!"
+          echo "=========================================="
+          echo ""
+          echo "Connect with: Apple Screen Sharing, RealVNC, or TigerVNC"
+          echo ""
+          echo "🔄 Session will stay alive for 6 hours..."
+          
+          # Keep alive
+          sleep 21600
